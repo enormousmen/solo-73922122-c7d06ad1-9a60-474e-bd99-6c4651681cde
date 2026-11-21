@@ -1,0 +1,18 @@
+services:
+  incremental-build:
+    build: .
+    image: c-diag-incremental-build:latest
+    container_name: c-diag-builder
+    ports:
+      - "8000:8000"
+    volumes:
+      # 持久化内容仓库与目标文件缓存，重启容器后仍可复用
+      - build-data:/workspace/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/files')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  build-data:

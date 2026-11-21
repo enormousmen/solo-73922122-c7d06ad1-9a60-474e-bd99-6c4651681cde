@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C 诊断工具 · 增量构建平台</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a212b; --border:#2b3644; --fg:#d7dde5;
+          --muted:#8a97a5; --accent:#4da3ff; --green:#3fb950; --amber:#d29922;
+          --red:#f85149; --purple:#bc8cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { padding:14px 22px; border-bottom:1px solid var(--border);
+           display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .meta { color:var(--muted); font-size:13px; }
+  .layout { display:grid; grid-template-columns: 300px 1fr 1fr; gap:14px; padding:14px 22px; }
+  @media (max-width: 1100px){ .layout{ grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+           padding:14px; min-width:0; }
+  .panel h2 { font-size:14px; margin:0 0 10px; color:var(--accent); }
+  .file-item { padding:8px 10px; border-radius:7px; cursor:pointer; font-size:13px;
+               display:flex; justify-content:space-between; gap:8px; border:1px solid transparent; }
+  .file-item:hover { background:#222c39; }
+  .file-item.active { background:#24344a; border-color:var(--accent); }
+  .file-item .kind { font-size:11px; color:var(--muted); }
+  textarea { width:100%; min-height:420px; background:#0d1117; color:var(--fg);
+             border:1px solid var(--border); border-radius:8px; padding:10px;
+             font-family: ui-monospace,Menlo,Consolas,monospace; font-size:12.5px;
+             line-height:1.55; resize:vertical; tab-size:4; }
+  .toolbar { display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; align-items:center; }
+  button { background:var(--accent); color:#08111d; border:0; border-radius:7px;
+           padding:8px 16px; font-weight:600; cursor:pointer; font-size:13px; }
+  button.secondary { background:#2b3644; color:var(--fg); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  input[type=text] { background:#0d1117; border:1px solid var(--border); color:var(--fg);
+                     border-radius:7px; padding:8px 10px; font-size:13px; min-width:180px; }
+  .flags { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.7;
+           font-family:ui-monospace,monospace; word-break:break-all; }
+  .build-card { border:1px solid var(--border); border-radius:9px; padding:12px;
+                margin-bottom:12px; background:#141b24; }
+  .build-head { display:flex; justify-content:space-between; align-items:center; gap:8px;
+                font-size:13px; flex-wrap:wrap; }
+  .bid { font-family:ui-monospace,monospace; color:var(--purple); font-weight:600; }
+  .badge { padding:2px 9px; border-radius:20px; font-size:12px; font-weight:600; }
+  .badge.pending,.badge.running { background:#26344a; color:var(--accent); }
+  .badge.success { background:#16361f; color:var(--green); }
+  .badge.failed { background:#3d1718; color:var(--red); }
+  .src-row { display:flex; align-items:center; gap:8px; font-size:12.5px; padding:7px 4px;
+             border-bottom:1px dashed #242e3b; flex-wrap:wrap; }
+  .src-row:last-child { border-bottom:0; }
+  .src-name { font-family:ui-monospace,monospace; min-width:110px; }
+  .st { padding:1px 8px; border-radius:12px; font-size:11px; font-weight:700; }
+  .st.compiled { background:#27384f; color:var(--accent); }
+  .st.reused { background:#16361f; color:var(--green); }
+  .st.failed { background:#3d1718; color:var(--red); }
+  .deps { color:var(--muted); font-size:11px; font-family:ui-monospace,monospace; }
+  .key { color:var(--amber); font-size:11px; font-family:ui-monospace,monospace; }
+  pre.err { background:#1d0f10; border:1px solid #4a2022; color:#ffb4b0; padding:10px;
+            border-radius:8px; font-size:12px; overflow:auto; max-height:260px; margin:8px 0 0;
+            white-space:pre-wrap; word-break:break-word; }
+  .note-msg { color:var(--muted); font-size:11px; }
+  .toast { position:fixed; right:20px; bottom:20px; background:#24344a; padding:10px 16px;
+           border-radius:8px; font-size:13px; display:none; border:1px solid var(--accent); }
+  a.dl { text-decoration:none; }
+  a.dl button { background:var(--green); color:#08140b; }
+  .empty { color:var(--muted); font-size:13px; text-align:center; padding:24px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>C 诊断工具 · 增量构建平台</h1>
+  <span class="meta">FastAPI + GCC · 内容快照隔离 · 依赖感知目标文件复用 · 并发单次编译</span>
+</header>
+
+<div class="layout">
+  <!-- 左：文件树 + 固定参数 -->
+  <div class="panel">
+    <h2>项目文件（固定）</h2>
+    <div id="fileTree"></div>
+    <div class="flags" id="flags"></div>
+  </div>
+
+  <!-- 中：编辑器 -->
+  <div class="panel">
+    <h2 id="editorTitle">代码编辑</h2>
+    <textarea id="editor" spellcheck="false"></textarea>
+    <div class="toolbar">
+      <button class="secondary" id="saveBtn">保存修改</button>
+      <input type="text" id="noteInput" placeholder="构建备注（可选，便于区分并行构建）">
+      <button id="buildBtn">提交构建</button>
+    </div>
+  </div>
+
+  <!-- 右：构建列表 -->
+  <div class="panel">
+    <h2>构建记录（自动刷新，可并行）</h2>
+    <div id="builds"><div class="empty">暂无构建，点击「提交构建」开始</div></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SOURCE_KIND = {".c":"源文件", ".h":"头文件"};
+let state = { files:{}, meta:null, current:null, pollTimer:null };
+
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.display = "block";
+  clearTimeout(t._timer);
+  t._timer = setTimeout(()=> t.style.display="none", 2500);
+}
+function esc(s){ return String(s).replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function shortHash(h){ return h ? h.slice(0,10) : ""; }
+
+async function loadFiles(){
+  const r = await fetch("/api/files");
+  const data = await r.json();
+  state.files = data.files; state.meta = data;
+  renderTree(); renderFlags();
+  if(!state.current) selectFile(data.source_files[0]);
+}
+function renderTree(){
+  const tree = document.getElementById("fileTree");
+  const names = [...state.meta.source_files, ...state.meta.header_files];
+  tree.innerHTML = names.map(n => `
+    <div class="file-item ${n===state.current?"active":""}" data-name="${esc(n)}">
+      <span>${esc(n)}</span>
+      <span class="kind">${SOURCE_KIND[n.slice(-2)] || ""}</span>
+    </div>`).join("");
+  tree.querySelectorAll(".file-item").forEach(el =>
+    el.onclick = () => selectFile(el.dataset.name));
+}
+function renderFlags(){
+  const m = state.meta;
+  document.getElementById("flags").innerHTML =
+    `编译器：${esc(m.compiler)}<br>` +
+    `编译参数：${esc(m.compile_flags.join(" "))}<br>` +
+    `链接参数：${esc(m.link_flags.join(" "))}<br>` +
+    `输出程序：${esc(m.program_name)}`;
+}
+function selectFile(name){
+  if(state.current !== null) state.files[state.current] = document.getElementById("editor").value;
+  state.current = name;
+  document.getElementById("editorTitle").textContent = "代码编辑 · " + name;
+  document.getElementById("editor").value = state.files[name] ?? "";
+  renderTree();
+}
+
+document.getElementById("saveBtn").onclick = async () => {
+  state.files[state.current] = document.getElementById("editor").value;
+  const r = await fetch("/api/files", {
+    method:"PUT", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({files:{[state.current]: state.files[state.current]}})
+  });
+  if(r.ok) toast("已保存 " + state.current); else toast("保存失败");
+};
+
+document.getElementById("buildBtn").onclick = async () => {
+  state.files[state.current] = document.getElementById("editor").value;
+  const btn = document.getElementById("buildBtn");
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/builds", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        files: state.files,
+        note: document.getElementById("noteInput").value || null
+      })
+    });
+    const data = await r.json();
+    if(!r.ok){ toast("提交失败：" + (data.detail || r.status)); return; }
+    toast("构建已提交：" + data.build_id);
+    document.getElementById("noteInput").value = "";
+    loadBuilds();
+  } finally { btn.disabled = false; }
+};
+
+async function loadBuilds(){
+  const r = await fetch("/api/builds");
+  const data = await r.json();
+  const box = document.getElementById("builds");
+  if(!data.builds.length){ box.innerHTML = '<div class="empty">暂无构建</div>'; return; }
+  box.innerHTML = data.builds.map(renderBuild).join("");
+  if(data.builds.some(b => b.status === "pending" || b.status === "running")) {
+    if(!state.pollTimer) state.pollTimer = setInterval(loadBuilds, 1000);
+  } else if(state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+}
+
+function renderBuild(b){
+  const rows = b.results.length ? b.results.map(r => `
+    <div class="src-row">
+      <span class="src-name">${esc(r.source)}</span>
+      <span class="st ${r.status}">${({compiled:"重编",reused:"复用",failed:"失败"})[r.status]||r.status}</span>
+      <span class="deps">依赖头: ${r.dependency_headers.length ? esc(r.dependency_headers.join(", ")) : "无"}</span>
+      <span class="key">obj:${shortHash(r.object_key)}</span>
+      <span class="note-msg">${r.duration_ms}ms</span>
+      ${r.error ? `<pre class="err">${esc(r.error)}</pre>` : ""}
+    </div>`).join("") : '<div class="note-msg">排队中 / 正在准备快照…</div>';
+
+  const linkBlock = (b.status === "failed" && b.link_status === "failed")
+    ? `<pre class="err">链接错误：\n${esc(b.link_error || b.error || "")}</pre>`
+    : (b.status === "failed" && !b.results.some(r=>r.error) && b.error
+        ? `<pre class="err">${esc(b.error)}</pre>` : "");
+
+  const download = b.program_available
+    ? `<a class="dl" href="/api/builds/${b.build_id}/download"><button>下载程序</button></a>` : "";
+
+  return `<div class="build-card">
+    <div class="build-head">
+      <span><span class="bid">#${esc(b.build_id)}</span>
+        ${b.note ? `<span class="note-msg">备注：${esc(b.note)}</span>` : ""}</span>
+      <span><span class="badge ${b.status}">${({pending:"排队",running:"构建中",success:"成功",failed:"失败"})[b.status]}</span></span>
+    </div>
+    ${rows}
+    ${linkBlock}
+    <div class="toolbar" style="margin-top:10px">
+      ${download}
+      <span class="note-msg">${esc(b.message || "")}${b.finished_at ? " · 完成于 "+new Date(b.finished_at*1000).toLocaleTimeString() : ""}</span>
+    </div>
+  </div>`;
+}
+
+loadFiles();
+loadBuilds();
+setInterval(loadBuilds, 4000);
+</script>
+</body>
+</html>
